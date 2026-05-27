@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Space Cadet Pinball</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #0b0b12; color: #d8d8e0; font-family: system-ui, sans-serif; }
+  #setup { max-width: 760px; margin: 0 auto; padding: 1.5rem 1.25rem; line-height: 1.5; }
+  #setup h1 { margin: 0 0 .5rem; font-size: 1.6rem; }
+  #setup p { margin: .6rem 0; }
+  code { background: #1d1d2a; padding: 0 .3rem; border-radius: 3px; }
+  .controls { margin: 1rem 0; }
+  .controls input { display: block; margin: .5rem 0; }
+  button { padding: .55rem 1.1rem; font-size: 1rem; background: #3a6df0; color: #fff; border: 0; border-radius: 5px; cursor: pointer; }
+  button:disabled { background: #444; cursor: default; }
+  #status { min-height: 1.4em; color: #9aa; font-size: .9rem; }
+  #canvas { display: block; margin: 0 auto; background: #000; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+  <div id="setup">
+    <h1>3D Pinball &mdash; Space Cadet (WebAssembly)</h1>
+    <p>This is the open-source engine compiled to WebAssembly. The game's data files
+       (graphics, sounds, music) are Microsoft's property and are <strong>not</strong> distributed here.
+       To play, point the picker below at your own copy of the game data.</p>
+    <p>Select the <strong>folder</strong> that contains <code>PINBALL.DAT</code> (or <code>CADET.DAT</code>)
+       along with its sound and music files. Selecting the whole folder preserves subfolders
+       such as <code>sound/</code> that Full Tilt builds need.</p>
+    <div class="controls">
+      <label>Game data folder:
+        <input type="file" id="dirpicker" webkitdirectory directory multiple>
+      </label>
+      <label>&hellip;or individual files:
+        <input type="file" id="filepicker" multiple>
+      </label>
+    </div>
+    <p><button id="startbtn">Start game</button></p>
+    <p id="status">Loading engine&hellip;</p>
+  </div>
+
+  <canvas id="canvas" class="hidden" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+
+  <script type="text/javascript">
+    var statusEl = document.getElementById('status');
+    var startBtn = document.getElementById('startbtn');
+    var moduleReady = false;
+
+    var Module = {
+      noInitialRun: true,
+      arguments: [],
+      canvas: document.getElementById('canvas'),
+      print: function (t) { console.log(t); },
+      printErr: function (t) { console.error(t); },
+      setStatus: function (t) { if (t) statusEl.textContent = t; },
+      onRuntimeInitialized: function () {
+        moduleReady = true;
+        Module.setStatus('Engine ready. Choose your game data, then press Start.');
+      },
+    };
+
+    // Collect selected files (preserving relative paths when a folder is picked),
+    // write them into the in-memory filesystem, then hand control to the game.
+    function gatherFiles() {
+      var out = [];
+      var pickers = [document.getElementById('dirpicker'), document.getElementById('filepicker')];
+      pickers.forEach(function (p) {
+        for (var i = 0; i < p.files.length; i++) {
+          var f = p.files[i];
+          // webkitRelativePath looks like "MyFolder/sound/foo.wav"; drop the chosen
+          // top-level folder so paths land at the FS root where the game searches.
+          var rel = f.webkitRelativePath || f.name;
+          var parts = rel.split('/');
+          if (parts.length > 1) parts.shift();
+          out.push({ file: f, path: '/' + parts.join('/') });
+        }
+      });
+      return out;
+    }
+
+    function writeFile(entry) {
+      return new Promise(function (resolve, reject) {
+        var reader = new FileReader();
+        reader.onload = function () {
+          try {
+            var dir = entry.path.substring(0, entry.path.lastIndexOf('/'));
+            if (dir) Module.FS.mkdirTree(dir);
+            Module.FS.writeFile(entry.path, new Uint8Array(reader.result));
+            resolve();
+          } catch (e) { reject(e); }
+        };
+        reader.onerror = function () { reject(reader.error); };
+        reader.readAsArrayBuffer(entry.file);
+      });
+    }
+
+    function startGame() {
+      if (!moduleReady) { Module.setStatus('Engine still loading, try again in a moment.'); return; }
+      startBtn.disabled = true;
+      var entries = gatherFiles();
+      Module.setStatus('Loading ' + entries.length + ' file(s)…');
+      Promise.all(entries.map(writeFile)).then(function () {
+        document.getElementById('setup').classList.add('hidden');
+        Module.canvas.classList.remove('hidden');
+        Module.canvas.focus();
+        try { Module.callMain(Module.arguments); }
+        catch (e) { Module.setStatus('Failed to start: ' + e); console.error(e); }
+      }).catch(function (e) {
+        startBtn.disabled = false;
+        Module.setStatus('Could not load files: ' + e);
+        console.error(e);
+      });
+    }
+
+    startBtn.addEventListener('click', startGame);
+  </script>
+  {{{ SCRIPT }}}
+</body>
+</html>

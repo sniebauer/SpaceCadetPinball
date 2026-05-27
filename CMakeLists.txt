@@ -233,12 +233,17 @@ if(EMSCRIPTEN)
             "-sUSE_SDL_MIXER=2"
             "-sALLOW_MEMORY_GROWTH=1"
             "-sEXIT_RUNTIME=0"
+            "-sFORCE_FILESYSTEM=1"
+            "-sEXPORTED_RUNTIME_METHODS=FS,callMain"
+            "SHELL:--shell-file ${CMAKE_CURRENT_LIST_DIR}/Platform/Web/shell.html"
             )
 
     # The game's copyrighted .DAT/sound assets cannot be redistributed, so they are
     # not in the repo. Point SPACECADET_DATA_DIR at a local folder containing them
     # (e.g. -DSPACECADET_DATA_DIR=/path/to/data) to bake them into the .data bundle,
     # mounted at the virtual filesystem root where the existing fopen() search finds them.
+    # When unset (e.g. the public Pages deploy), the shell lets the player supply their
+    # own data files at runtime via the in-page file picker.
     if(SPACECADET_DATA_DIR)
         target_link_options(SpaceCadetPinball PRIVATE
                 "SHELL:--preload-file ${SPACECADET_DATA_DIR}@/")
