@@ -12,6 +12,10 @@
 #include "translations.h"
 #include "font_selection.h"
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
+
 constexpr const char* winmain::Version;
 
 SDL_Window* winmain::MainWindow = nullptr;
@@ -51,6 +55,11 @@ optionsStruct& winmain::Options = options::Options;
 winmain::DurationMs winmain::SpinThreshold = DurationMs(0.005);
 WelfordState winmain::SleepState{};
 int winmain::CursorIdleCounter = 0;
+
+unsigned winmain::loopUpdateCounter = 0, winmain::loopFrameCounter = 0;
+winmain::TimePoint winmain::loopFrameStart, winmain::loopPrevTime;
+double winmain::loopUpdateToFrameCounter = 0;
+winmain::DurationMs winmain::loopSleepRemainder{0}, winmain::loopFrameDuration{0};
 
 int winmain::WinMain(LPCSTR lpCmdLine)
 {
@@ -295,160 +304,184 @@ int winmain::WinMain(LPCSTR lpCmdLine)
 void winmain::MainLoop()
 {
 	bQuit = false;
-	unsigned updateCounter = 0, frameCounter = 0;
-	auto frameStart = Clock::now();
-	double UpdateToFrameCounter = 0;
-	DurationMs sleepRemainder(0), frameDuration(TargetFrameTime);
-	auto prevTime = frameStart;
+	loopUpdateCounter = loopFrameCounter = 0;
+	loopFrameStart = Clock::now();
+	loopUpdateToFrameCounter = 0;
+	loopSleepRemainder = DurationMs(0);
+	loopFrameDuration = TargetFrameTime;
+	loopPrevTime = loopFrameStart;
 
-	while (true)
-	{
-		if (DispFrameRate)
-		{
-			auto curTime = Clock::now();
-			if (curTime - prevTime > DurationMs(1000))
-			{
-				char buf[60];
-				auto elapsedSec = DurationMs(curTime - prevTime).count() * 0.001;
-				snprintf(buf, sizeof buf, "Updates/sec = %02.02f Frames/sec = %02.02f ",
-				         updateCounter / elapsedSec, frameCounter / elapsedSec);
-				SDL_SetWindowTitle(MainWindow, buf);
-				FpsDetails = buf;
-				frameCounter = updateCounter = 0;
-				prevTime = curTime;
-			}
-		}
-
-		if (!ProcessWindowMessages() || bQuit)
-			break;
-
-		if (has_focus)
-		{
-			if (mouse_down)
-			{
-				int x, y, w, h;
-				SDL_GetMouseState(&x, &y);
-				SDL_GetWindowSize(MainWindow, &w, &h);
-				float dx = static_cast<float>(last_mouse_x - x) / static_cast<float>(w);
-				float dy = static_cast<float>(y - last_mouse_y) / static_cast<float>(h);
-				pb::ballset(dx, dy);
-
-				// Original creates continuous mouse movement with mouse capture.
-				// Alternative solution: mouse warp at window edges.
-				int xMod = 0, yMod = 0;
-				if (x == 0 || x >= w - 1)
-					xMod = w - 2;
-				if (y == 0 || y >= h - 1)
-					yMod = h - 2;
-				if (xMod != 0 || yMod != 0)
-				{
-					// Mouse warp does not work over remote desktop or in some VMs
-					x = abs(x - xMod);
-					y = abs(y - yMod);
-					SDL_WarpMouseInWindow(MainWindow, x, y);
-				}
-
-				last_mouse_x = x;
-				last_mouse_y = y;
-			}
-			if (!single_step && !no_time_loss)
-			{
-				auto dt = static_cast<float>(frameDuration.count());
-				pb::frame(dt);
-				if (DispGRhistory)
-				{
-					auto targetSize = static_cast<unsigned>(static_cast<float>(Options.UpdatesPerSecond) * gfrWindow);
-					if (gfrDisplay.size() != targetSize)
-					{
-						gfrDisplay.resize(targetSize, static_cast<float>(TargetFrameTime.count()));
-						gfrOffset = 0;
-					}
-					gfrDisplay[gfrOffset] = dt;
-					gfrOffset = (gfrOffset + 1) % gfrDisplay.size();
-				}
-				updateCounter++;
-			}
-			no_time_loss = false;
-
-			if (UpdateToFrameCounter >= UpdateToFrameRatio)
-			{
-				if (Options.HideCursor && CursorIdleCounter <= 0)
-					ImGui::SetMouseCursor(ImGuiMouseCursor_None);
-				ImGui_ImplSDL2_NewFrame();
-				ImGui_Render_NewFrame();
-				ImGui::NewFrame();
-				RenderUi();
-
-				SDL_RenderClear(Renderer);
-				// Alternative clear hack, clear might fail on some systems
-				// Todo: remove original clear, if save for all platforms
-				SDL_RenderFillRect(Renderer, nullptr);
-				render::PresentVScreen();
-
-				ImGui::Render();
-				ImGui_Render_RenderDrawData(ImGui::GetDrawData());
-
-				SDL_RenderPresent(Renderer);
-				frameCounter++;
-				UpdateToFrameCounter -= UpdateToFrameRatio;
-			}
-
-			auto sdlError = SDL_GetError();
-			if (sdlError[0] || !PrevSdlError.empty())
-			{
-				if (sdlError[0])
-					SDL_ClearError();
-
-				// Rate limit duplicate SDL error messages.
-				if (sdlError != PrevSdlError)
-				{
-					PrevSdlError = sdlError;
-					if (PrevSdlErrorCount > 0)
-					{
-						printf("SDL Error: ^ Previous Error Repeated %u Times\n", PrevSdlErrorCount + 1);
-						PrevSdlErrorCount = 0;
-					}
-
-					if (sdlError[0])
-						printf("SDL Error: %s\n", sdlError);
-				}
-				else
-				{
-					PrevSdlErrorCount++;
-				}
-			}
-
-			auto updateEnd = Clock::now();
-			auto targetTimeDelta = TargetFrameTime - DurationMs(updateEnd - frameStart) - sleepRemainder;
-
-			TimePoint frameEnd;
-			if (targetTimeDelta > DurationMs::zero() && !Options.UncappedUpdatesPerSecond)
-			{
-				if (Options.HybridSleep)
-					HybridSleep(targetTimeDelta);
-				else
-					std::this_thread::sleep_for(targetTimeDelta);
-				frameEnd = Clock::now();
-			}
-			else
-			{
-				frameEnd = updateEnd;
-			}
-
-			// Limit duration to 2 * target time
-			sleepRemainder = Clamp(DurationMs(frameEnd - updateEnd) - targetTimeDelta, -TargetFrameTime,
-			                       TargetFrameTime);
-			frameDuration = std::min<DurationMs>(DurationMs(frameEnd - frameStart), 2 * TargetFrameTime);
-			frameStart = frameEnd;
-			UpdateToFrameCounter++;
-
-			CursorIdleCounter = std::max(CursorIdleCounter - static_cast<int>(frameDuration.count()), 0);
-		}
-	}
+#ifdef __EMSCRIPTEN__
+	// The browser cannot block on an infinite loop; it drives each frame via
+	// requestAnimationFrame. fps = 0 lets the browser pick the refresh rate, and
+	// simulate_infinite_loop = true unwinds the stack so this call never returns.
+	// As a consequence the restart/cleanup path below WinMain's MainLoop() call
+	// does not run on the web build (acceptable: the tab teardown reclaims everything).
+	emscripten_set_main_loop(&winmain::MainLoopTick, 0, true);
+#else
+	while (!bQuit)
+		MainLoopTick();
 
 	if (PrevSdlErrorCount > 0)
 	{
 		printf("SDL Error: ^ Previous Error Repeated %u Times\n", PrevSdlErrorCount);
+	}
+#endif
+}
+
+void winmain::MainLoopTick()
+{
+	if (DispFrameRate)
+	{
+		auto curTime = Clock::now();
+		if (curTime - loopPrevTime > DurationMs(1000))
+		{
+			char buf[60];
+			auto elapsedSec = DurationMs(curTime - loopPrevTime).count() * 0.001;
+			snprintf(buf, sizeof buf, "Updates/sec = %02.02f Frames/sec = %02.02f ",
+			         loopUpdateCounter / elapsedSec, loopFrameCounter / elapsedSec);
+			SDL_SetWindowTitle(MainWindow, buf);
+			FpsDetails = buf;
+			loopFrameCounter = loopUpdateCounter = 0;
+			loopPrevTime = curTime;
+		}
+	}
+
+	if (!ProcessWindowMessages() || bQuit)
+	{
+		bQuit = true;
+#ifdef __EMSCRIPTEN__
+		emscripten_cancel_main_loop();
+#endif
+		return;
+	}
+
+	if (has_focus)
+	{
+		if (mouse_down)
+		{
+			int x, y, w, h;
+			SDL_GetMouseState(&x, &y);
+			SDL_GetWindowSize(MainWindow, &w, &h);
+			float dx = static_cast<float>(last_mouse_x - x) / static_cast<float>(w);
+			float dy = static_cast<float>(y - last_mouse_y) / static_cast<float>(h);
+			pb::ballset(dx, dy);
+
+			// Original creates continuous mouse movement with mouse capture.
+			// Alternative solution: mouse warp at window edges.
+			int xMod = 0, yMod = 0;
+			if (x == 0 || x >= w - 1)
+				xMod = w - 2;
+			if (y == 0 || y >= h - 1)
+				yMod = h - 2;
+			if (xMod != 0 || yMod != 0)
+			{
+				// Mouse warp does not work over remote desktop or in some VMs
+				x = abs(x - xMod);
+				y = abs(y - yMod);
+				SDL_WarpMouseInWindow(MainWindow, x, y);
+			}
+
+			last_mouse_x = x;
+			last_mouse_y = y;
+		}
+		if (!single_step && !no_time_loss)
+		{
+			auto dt = static_cast<float>(loopFrameDuration.count());
+			pb::frame(dt);
+			if (DispGRhistory)
+			{
+				auto targetSize = static_cast<unsigned>(static_cast<float>(Options.UpdatesPerSecond) * gfrWindow);
+				if (gfrDisplay.size() != targetSize)
+				{
+					gfrDisplay.resize(targetSize, static_cast<float>(TargetFrameTime.count()));
+					gfrOffset = 0;
+				}
+				gfrDisplay[gfrOffset] = dt;
+				gfrOffset = (gfrOffset + 1) % gfrDisplay.size();
+			}
+			loopUpdateCounter++;
+		}
+		no_time_loss = false;
+
+		if (loopUpdateToFrameCounter >= UpdateToFrameRatio)
+		{
+			if (Options.HideCursor && CursorIdleCounter <= 0)
+				ImGui::SetMouseCursor(ImGuiMouseCursor_None);
+			ImGui_ImplSDL2_NewFrame();
+			ImGui_Render_NewFrame();
+			ImGui::NewFrame();
+			RenderUi();
+
+			SDL_RenderClear(Renderer);
+			// Alternative clear hack, clear might fail on some systems
+			// Todo: remove original clear, if save for all platforms
+			SDL_RenderFillRect(Renderer, nullptr);
+			render::PresentVScreen();
+
+			ImGui::Render();
+			ImGui_Render_RenderDrawData(ImGui::GetDrawData());
+
+			SDL_RenderPresent(Renderer);
+			loopFrameCounter++;
+			loopUpdateToFrameCounter -= UpdateToFrameRatio;
+		}
+
+		auto sdlError = SDL_GetError();
+		if (sdlError[0] || !PrevSdlError.empty())
+		{
+			if (sdlError[0])
+				SDL_ClearError();
+
+			// Rate limit duplicate SDL error messages.
+			if (sdlError != PrevSdlError)
+			{
+				PrevSdlError = sdlError;
+				if (PrevSdlErrorCount > 0)
+				{
+					printf("SDL Error: ^ Previous Error Repeated %u Times\n", PrevSdlErrorCount + 1);
+					PrevSdlErrorCount = 0;
+				}
+
+				if (sdlError[0])
+					printf("SDL Error: %s\n", sdlError);
+			}
+			else
+			{
+				PrevSdlErrorCount++;
+			}
+		}
+
+		auto updateEnd = Clock::now();
+		TimePoint frameEnd;
+#ifdef __EMSCRIPTEN__
+		// The browser paces frames via requestAnimationFrame; no manual sleep.
+		frameEnd = updateEnd;
+		loopSleepRemainder = DurationMs(0);
+#else
+		auto targetTimeDelta = TargetFrameTime - DurationMs(updateEnd - loopFrameStart) - loopSleepRemainder;
+		if (targetTimeDelta > DurationMs::zero() && !Options.UncappedUpdatesPerSecond)
+		{
+			if (Options.HybridSleep)
+				HybridSleep(targetTimeDelta);
+			else
+				std::this_thread::sleep_for(targetTimeDelta);
+			frameEnd = Clock::now();
+		}
+		else
+		{
+			frameEnd = updateEnd;
+		}
+
+		// Limit duration to 2 * target time
+		loopSleepRemainder = Clamp(DurationMs(frameEnd - updateEnd) - targetTimeDelta, -TargetFrameTime,
+		                           TargetFrameTime);
+#endif
+		loopFrameDuration = std::min<DurationMs>(DurationMs(frameEnd - loopFrameStart), 2 * TargetFrameTime);
+		loopFrameStart = frameEnd;
+		loopUpdateToFrameCounter++;
+
+		CursorIdleCounter = std::max(CursorIdleCounter - static_cast<int>(loopFrameDuration.count()), 0);
 	}
 }
 

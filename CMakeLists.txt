@@ -32,8 +32,17 @@ endif()
 # SDL2main is not needed
 set(SDL2_BUILDING_LIBRARY ON)
 
-find_package(SDL2 REQUIRED)
-FIND_PACKAGE(SDL2_mixer REQUIRED)
+if(EMSCRIPTEN)
+    # Emscripten ships its own SDL2 and SDL2_mixer ports; they are pulled in via
+    # compiler/linker flags instead of find_package. These flags must be present
+    # at compile time so that #include "SDL.h"/<SDL_mixer.h> resolve.
+    set(EMSCRIPTEN_SDL_FLAGS "-sUSE_SDL=2 -sUSE_SDL_MIXER=2")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${EMSCRIPTEN_SDL_FLAGS}")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${EMSCRIPTEN_SDL_FLAGS}")
+else()
+    find_package(SDL2 REQUIRED)
+    FIND_PACKAGE(SDL2_mixer REQUIRED)
+endif()
 
 include_directories(${SDL2_INCLUDE_DIR} ${SDL2_MIXER_INCLUDE_DIR})
 get_property(dirs DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY INCLUDE_DIRECTORIES)
@@ -216,7 +225,27 @@ if(${CMAKE_VERSION} VERSION_GREATER "3.16.0" OR ${CMAKE_VERSION} VERSION_EQUAL "
             )
 endif()
 
-target_link_libraries(SpaceCadetPinball ${SDL2_LIBRARY} ${SDL2_MIXER_LIBRARY})
+if(EMSCRIPTEN)
+    # Output a self-contained <name>.html + .js + .wasm bundle.
+    set_target_properties(SpaceCadetPinball PROPERTIES SUFFIX ".html")
+    target_link_options(SpaceCadetPinball PRIVATE
+            "-sUSE_SDL=2"
+            "-sUSE_SDL_MIXER=2"
+            "-sALLOW_MEMORY_GROWTH=1"
+            "-sEXIT_RUNTIME=0"
+            )
+
+    # The game's copyrighted .DAT/sound assets cannot be redistributed, so they are
+    # not in the repo. Point SPACECADET_DATA_DIR at a local folder containing them
+    # (e.g. -DSPACECADET_DATA_DIR=/path/to/data) to bake them into the .data bundle,
+    # mounted at the virtual filesystem root where the existing fopen() search finds them.
+    if(SPACECADET_DATA_DIR)
+        target_link_options(SpaceCadetPinball PRIVATE
+                "SHELL:--preload-file ${SPACECADET_DATA_DIR}@/")
+    endif()
+else()
+    target_link_libraries(SpaceCadetPinball ${SDL2_LIBRARY} ${SDL2_MIXER_LIBRARY})
+endif()
 
 # On Windows, copy DLL to output
 if(WIN32)
@@ -235,7 +264,7 @@ if(WIN32)
         )
 endif()
 
-if(UNIX AND NOT APPLE)
+if(UNIX AND NOT APPLE AND NOT EMSCRIPTEN)
 	include(GNUInstallDirs)
 	install(TARGETS "${PROJECT_NAME}" RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 	install(FILES "${CMAKE_SOURCE_DIR}/Platform/Linux/${PROJECT_NAME}.desktop" DESTINATION "share/applications")

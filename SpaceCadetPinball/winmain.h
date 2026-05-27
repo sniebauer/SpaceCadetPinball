@@ -112,5 +112,13 @@ private:
 	static void RenderFrameTimeDialog();
 	static void HybridSleep(DurationMs seconds);
 	static void MainLoop();
+	static void MainLoopTick();
 	static void ImGuiMenuItemWShortcut(GameBindings binding, bool selected = false);
+
+	// Persistent main loop state, shared between iterations.
+	// On the web build each frame is a separate callback, so this cannot be loop-local.
+	static unsigned loopUpdateCounter, loopFrameCounter;
+	static TimePoint loopFrameStart, loopPrevTime;
+	static double loopUpdateToFrameCounter;
+	static DurationMs loopSleepRemainder, loopFrameDuration;
 };
